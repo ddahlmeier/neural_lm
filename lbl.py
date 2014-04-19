@@ -59,59 +59,41 @@ class LogBilinearLanguageModel(object):
         """
         # training contexts
         self.context = context
-
         # initialize context word embedding matrix R of shape (V, K)
         # TODO: parameterize initialization
-        R_values = np.asarray(rng.uniform(-0.01, 0.01, size=(V, K)), dtype=theano.config.floatX)
+        R_values = np.asarray(rng.uniform(-0.01, 0.01, size=(V, K)), 
+                              dtype=theano.config.floatX)
         self.R = theano.shared(value=R_values, name='R', borrow=True)
-
         # initialize target word embedding matrix Q of shape (V, K)
-        Q_values = np.asarray(rng.uniform(-0.01, 0.01, size=(V, K)), dtype=theano.config.floatX)
+        Q_values = np.asarray(rng.uniform(-0.01, 0.01, size=(V, K)), 
+                              dtype=theano.config.floatX)
         self.Q = theano.shared(value=Q_values, name='Q', borrow=True)
-
         # initialize weight tensor C of shape (context_sz, K, K)
-        C_values = np.asarray(rng.normal(0, math.sqrt(0.1), size=(context_sz, K, K)), dtype=theano.config.floatX)
+        C_values = np.asarray(rng.normal(0, math.sqrt(0.1), 
+                                         size=(context_sz, K, K)), 
+                              dtype=theano.config.floatX)
         self.C = theano.shared(value=C_values, name='C', borrow=True)
-
         # initialize bias vector 
-        b_values = np.asarray(rng.normal(0, math.sqrt(0.1), size=(1,V)), dtype=theano.config.floatX)
+        b_values = np.asarray(rng.normal(0, math.sqrt(0.1), size=(V,)), 
+                              dtype=theano.config.floatX)
         self.b = theano.shared(value=b_values, name='b', borrow=True)
-
-         # r_w : context word representations
+        # context word representations
         self.r_w = self.R[context]
-        # q_hat : predicted word representation for target word
+        # predicted word representation for target word
         self.q_hat = T.tensordot(self.C, self.r_w, axes=[[0,1], [1,2]])
-        # s_wh : similarity score between predicted word and all target words
-        self.s = T.dot(self.Q, self.q_hat) + T.reshape(self.b, (V,1))
+        # similarity score between predicted word and all target words
+        self.s = T.transpose(T.dot(self.Q, self.q_hat) + T.reshape(self.b, (V,1)))
         # softmax activation function
         self.p_w_given_h = T.nnet.softmax(self.s)
-
-        # compute prediction as class whose probability is maximal in
-        # symbolic form
-        self.y_pred = T.argmax(self.p_w_given_h, axis=1)
-
         # parameters of the model
         self.params = [self.R, self.Q, self.C, self.b]
 
     def negative_log_likelihood(self, y):
         # take the logarithm with base 2
-        return -T.mean(T.log2(T.transpose(self.p_w_given_h))[T.arange(y.shape[0]),y])
+        return -T.mean(T.log2(self.p_w_given_h)[T.arange(y.shape[0]), y])
 
-
-    def errors(self, y):
-        # check if y has same dimension of y_pred
-        if y.ndim != self.y_pred.ndim:
-            raise TypeError('y should have the same shape as self.y_pred',
-                ('y', target.type, 'y_pred', self.y_pred.type))
-        # check if y is of the correct datatype
-        if y.dtype.startswith('int'):
-            # the T.neq operator returns a vector of 0s and 1s, where 1
-            # represents a mistake in prediction
-            return T.mean(T.neq(self.y_pred, y))
-        else:
-            raise NotImplementedError()
         
-def make_instances(corpus, vocab, context_sz):
+def make_instances(corpus, vocab, context_sz, start_symb='<s>', end_symb='</s>'):
     def shared_dataset(data_xy, borrow=True):
         data_x, data_y = data_xy
         shared_x = theano.shared(np.asarray(data_x, dtype=np.int32), borrow=borrow)
@@ -121,12 +103,11 @@ def make_instances(corpus, vocab, context_sz):
     labels = []        
     for sentence in corpus:
         # add 'start of sentence' and 'end of sentence' context
-        sentence = ['<s>'] * context_sz + sentence + ['</s>'] * context_sz
-        sentence = vocab.doc_words_to_ids(sentence, update_dict=False, unk='<unk>')
+        sentence = [start_symb] * context_sz + sentence + [end_symb] * context_sz
+        sentence = vocab.doc_words_to_ids(sentence, update_dict=False)
         for instance in zip(*(sentence[i:] for i in xrange(context_sz+1))):
             data.append(instance[:-1])
             labels.append(instance[-1])
-
     train_set_x, train_set_y = shared_dataset([data, labels])
     return train_set_x, train_set_y
 
@@ -141,9 +122,9 @@ def train_lbl(train_data, dev_data, test_data=[],
     Train log-bilinear model
     """
     # create vocabulary from train data, plus <s>, </s>
-    vocab = Dictionary.from_corpus(train_data)
-    vocab.lookup_id('<s>', update_dict = True)
-    vocab.lookup_id('</s>', update_dict = True)
+    vocab = Dictionary.from_corpus(train_data, unk='<unk>')
+    vocab.add_word('<s>')
+    vocab.add_word('</s>')
     V = vocab.size()
 
     # initialize random generator if not provided
@@ -168,7 +149,7 @@ def train_lbl(train_data, dev_data, test_data=[],
     # create log-bilinear model
     lbl = LogBilinearLanguageModel(x, V, K, context_sz, rng)
 
-    # cost function during training is negative log likelihood of the training data
+    # cost function is negative log likelihood of the training data
     cost = lbl.negative_log_likelihood(y)
 
     # compute the gradient
@@ -182,45 +163,42 @@ def train_lbl(train_data, dev_data, test_data=[],
     for param, gparam in zip(lbl.params, gparams):
         updates.append((param, param-learning_rate*gparam))
 
-    # compiling theano functions that computes log-probability of the dev set
+    # function that computes log-probability of the dev set
     logprob_dev = theano.function(inputs=[index], outputs=cost,
-                                 givens={x: dev_set_x[index*batch_size:(index+1)*batch_size],
-                                         y: dev_set_y[index*batch_size:(index+1)*batch_size]
-                                         })
+                                  givens={x: dev_set_x[index*batch_size:
+                                                           (index+1)*batch_size],
+                                          y: dev_set_y[index*batch_size:
+                                                           (index+1)*batch_size]
+                                          })
 
 
-    # validate_model = theano.function(inputs=[index],
-    #                                  outputs=lbl.errors(y),
-    #                                  givens={ x: dev_set_x[index * batch_size:(index + 1) * batch_size],
-    #                                           y: dev_set_y[index * batch_size:(index + 1) * batch_size]})
-
-    # compiling theano functions that computes log-probability of the test set
+    # function that computes log-probability of the test set
     logprob_test = theano.function(inputs=[index], outputs=cost,
-                                 givens={x: test_set_x[index*batch_size:(index+1)*batch_size],
-                                         y: test_set_y[index*batch_size:(index+1)*batch_size]
-                                         })
+                                   givens={x: test_set_x[index*batch_size:
+                                                             (index+1)*batch_size],
+                                           y: test_set_y[index*batch_size:
+                                                             (index+1)*batch_size]
+                                           })
     
-    # compiling theano function 'train model' that returns the cost
-    # and updates the parameter of the model 
+    # function that returns the cost and updates the parameter 
     train_model = theano.function(inputs=[index], outputs=cost,
                                   updates=updates,
-                                  givens={x: train_set_x[index*batch_size:(index+1)*batch_size],
-                                          y: train_set_y[index*batch_size:(index+1)*batch_size]
+                                  givens={x: train_set_x[index*batch_size:
+                                                             (index+1)*batch_size],
+                                          y: train_set_y[index*batch_size:
+                                                             (index+1)*batch_size]
                                           })
 
     # perplexity functions
     def compute_dev_logp():
         return np.mean([logprob_dev(i) for i in xrange(n_dev_batches)])
 
-    def compute_dev_ppl():
-        return np.power(2.0, compute_dev_logp())
-
     def compute_test_logp():
         return np.mean([logprob_test(i) for i in xrange(n_test_batches)])
 
-    def compute_test_ppl():
-        return np.power(2.0, compute_test_logp())
-        
+    def ppl(neg_logp):
+        return np.power(2.0, neg_logp)
+
     # train model
     logger.info("training model...")
     best_params = None
@@ -236,47 +214,40 @@ def train_lbl(train_data, dev_data, test_data=[],
             break
         logger.debug('epoch %i' % epoch) 
         for minibatch_index in xrange(n_train_batches):
-            minibatch_avg_cost  = train_model(minibatch_index)
-            # iteration number
-            itr = epoch * n_train_batches + minibatch_index            
-            if itr % validation_freq == 0:
+            itr = epoch * n_train_batches + minibatch_index
+            train_logp = train_model(minibatch_index)
+            logger.debug('epoch %i, minibatch %i/%i, train minibatch log prob %.4f ppl %.4f' % 
+                         (epoch, minibatch_index+1, n_train_batches, 
+                          train_logp, ppl(train_logp)))
+            if (itr+1) % validation_freq == 0:
                 # compute perplexity on dev set, lower is better
                 dev_logp = compute_dev_logp()
-                dev_ppl = compute_dev_ppl()
-                logger.debug('epoch %i, minibatch %i/%i, dev ppl %.4f' % (epoch, minibatch_index+1,
-                                                                                   n_train_batches, dev_ppl))
-                logger.debug('epoch %i, minibatch %i/%i, dev log prob %.4f' % (epoch, minibatch_index+1,
-                                                                                   n_train_batches, dev_logp))
-
-                validation_losses = [validate_model(i) for i in xrange(n_valid_batches)]
-                this_validation_loss = numpy.mean(validation_losses)
-                logger.debug('epoch %i, minibatch %i/%i, dev log prob %.4f' % (epoch, minibatch_index+1, this_validation_loss))
-
-
+                dev_ppl = ppl(dev_logp)
+                logger.debug('epoch %i, minibatch %i/%i, dev log prob %.4f ppl %.4f' % 
+                             (epoch, minibatch_index+1, n_train_batches, 
+                              dev_logp, ppl(dev_logp)))
                 # if we got the lowest perplexity until now
                 if dev_ppl < best_dev_ppl:
                     # improve patience if loss improvement is good enough
                     if patience and dev_ppl < best_dev_ppl * improvement_thrs:
                         patience = max(patience, itr * patience_incr)
                     best_dev_ppl = dev_ppl
-                    # test perplexity
                     test_logp = compute_test_logp()
-                    test_ppl = compute_test_ppl()
-                    logger.debug('  epoch %i, minibatch %i/%i, test ppl %.4f' % (epoch, minibatch_index+1, 
-                                                                                  n_train_batches, test_ppl))
-                    logger.debug('epoch %i, minibatch %i/%i, test log prob %.4f' % (epoch, minibatch_index+1,
-                                                                                    n_train_batches, test_logp))
+                    test_ppl = ppl(test_logp)
+                    logger.debug('epoch %i, minibatch %i/%i, test log prob %.4f ppl %.4f' % 
+                                 (epoch, minibatch_index+1, n_train_batches, 
+                                  test_logp, ppl(test_logp)))
             # stop learning if no improvement was seen for a long time
             if patience and patience <= itr:
                 done_looping = True
                 break
         # adapt learning rate
         if rate_update == 'simple':
-            # set learning rate to 1 / epoch index (1, 0.5, 0.33, ..)
+            # set learning rate to 1 / (epoch+1)
             learning_rate = 1.0 / (epoch+1)
         elif rate_update == 'adaptive':
-            # half learning rate if perplexity increased at end of epoch
-            this_epoch_dev_ppl = compute_dev_ppl()
+            # half learning rate if perplexity increased at end of epoch (Mnih and Teh 2012)
+            this_epoch_dev_ppl = ppl(compute_dev_logp())
             if this_epoch_dev_ppl > last_epoch_dev_ppl:
                 learning_rate /= 2.0
             last_epoch_dev_ppl = this_epoch_dev_ppl
@@ -286,13 +257,14 @@ def train_lbl(train_data, dev_data, test_data=[],
         else:
             raise ValueError("Unknown learning rate update strategy: %s" %rate_update)
         
-
     end_time = time.clock()
     total_time = end_time - start_time
-    logger.info('Optimization complete with best dev ppl of %.4f and test ppl %.4f' % (best_dev_ppl, test_ppl))
+    logger.info('Optimization complete with best dev ppl of %.4f and test ppl %.4f' % 
+                (best_dev_ppl, test_ppl))
     logger.info('Training took %d epochs, with %.1f epochs/sec' % (epoch+1, 
                 float(epoch+1) / total_time))
-    logger.info("Total training time %d days %d hours %d min %d sec." % (total_time/60/60/24, total_time/60/60%24, total_time/60%60, total_time%60))
+    logger.info("Total training time %d days %d hours %d min %d sec." % 
+                (total_time/60/60/24, total_time/60/60%24, total_time/60%60, total_time%60))
 
     
 if __name__ == '__main__':
