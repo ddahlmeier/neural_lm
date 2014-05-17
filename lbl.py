@@ -12,6 +12,7 @@ Usage: lbl.py [--verbose] [--word_dim WORD_DIM] [--context_sz CONTEXT_SZ]
               [--epochs EPOCHS] [--batch_size BATCH_SZ] [--seed SEED]  
               [--patience PATIENCE] [--patience_incr PATIENCE_INCR] 
               [--improvement_thrs IMPR_THRS] [--validation_freq VALID_FREQ] 
+              [--model MODEL_FILE] 
               <train_data> <dev_data> [<test_data>]
 
 Arguments:
@@ -32,6 +33,7 @@ Options:
     -i PATIENCE_INCR, --patience_incr=PATIENCE   wait for this much longer when a new best result is found [default: 2]
     -t IMPR_THRS, --improvement_thrs=IMPR_THRS   a relative improvemnt of this is considered significant [default: 0.995]
     -f VALID_FREQ, --validation_freq=VALID_FREQ  number of examples after which check score on dev set [default: 1000]
+    -m MODEL_FILE, --model=MODEL_FILE            file to save the model to. Default none.
 """
 
 from dataset import Dictionary, load_corpus
@@ -265,6 +267,8 @@ def train_lbl(train_data, dev_data, test_data=[],
                 float(epoch+1) / total_time))
     logger.info("Total training time %d days %d hours %d min %d sec." % 
                 (total_time/60/60/24, total_time/60/60%24, total_time/60%60, total_time%60))
+    # return model
+    return lbl
 
     
 if __name__ == '__main__':
@@ -288,6 +292,7 @@ if __name__ == '__main__':
     patience_incr = int(arguments['--patience_incr'])
     improvement_thrs = float(arguments['--improvement_thrs'])
     validation_freq = int(arguments['--validation_freq'])
+    outfile = arguments['--model']
 
     # load data
     logger.info("Load data ...")
@@ -305,10 +310,18 @@ if __name__ == '__main__':
     rng_state = np.random.RandomState(seed)
 
     # train lm model
-    train_lbl(train_data, dev_data, test_data=test_data, 
+    lbl = train_lbl(train_data, dev_data, test_data=test_data, 
               K=word_dim, context_sz=context_sz, learning_rate=learn_rate, 
               rate_update=rate_update, epochs=epochs, batch_size = batch_sz, 
               rng=rng_state, patience=patience, patience_incr=patience_incr, 
               improvement_thrs=improvement_thrs, validation_freq=validation_freq)
-              
+    # save the model
+    if outfile:
+        logger.info("Saving model ...")
+        fout = open(outfile, 'wb')
+        for param in lbl.params:
+            cPickle.dump(param.get_value(borrow=True), fout, -1)
+        fout.close()
+        
+        
 
